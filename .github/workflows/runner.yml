@@ -41,6 +41,11 @@ jobs:
           sudo apt-get install -y -qq mysql-server-8.0
           sudo systemctl stop mysql || true
           sudo systemctl disable mysql || true
+          
+          # DESACTIVAR APPARMOR PARA MYSQL
+          # Vital para permitir que MySQL escriba fuera de /var/lib/mysql
+          sudo aa-disable /usr/sbin/mysqld || true
+          
           mysql --version
 
       # ── 2. Restaurar cache del ciclo anterior ────────────────────────────
@@ -67,9 +72,9 @@ jobs:
           else
             echo "Datadir inválido o vacío — reinicializando..."
 
+            # ELIMINAR el directorio. No lo creamos con mkdir.
+            # Dejamos que mysqld lo cree desde cero.
             sudo rm -rf "${MYSQL_DATADIR}"
-            sudo mkdir -p "${MYSQL_DATADIR}"
-            sudo chown runner:runner "${MYSQL_DATADIR}"
 
             sudo mysqld \
               --initialize-insecure \
@@ -85,7 +90,8 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          mysqld \
+          # Arrancamos mysqld con sudo para mantener coherencia de permisos
+          sudo mysqld \
             --user=runner \
             --datadir="${MYSQL_DATADIR}" \
             --bind-address=127.0.0.1 \
@@ -95,8 +101,6 @@ jobs:
             --log-error=/tmp/mysql-error.log \
             --skip-networking=OFF \
             > /tmp/mysql-stdout.log 2>&1 &
-
-          echo $! > /tmp/mysql.pid
 
           echo "Esperando que MySQL esté listo..."
 
@@ -110,10 +114,13 @@ jobs:
               break
             fi
 
-            if ! kill -0 "$(cat /tmp/mysql.pid 2>/dev/null)" 2>/dev/null; then
-              echo "MySQL murió antes de arrancar:"
-              cat /tmp/mysql-error.log || true
-              exit 1
+            # Validar de forma segura comprobando que el archivo PID exista primero
+            if [ -f /tmp/mysql.pid ]; then
+              if ! sudo kill -0 "$(sudo cat /tmp/mysql.pid)" 2>/dev/null; then
+                echo "MySQL murió antes de arrancar:"
+                cat /tmp/mysql-error.log || true
+                exit 1
+              fi
             fi
 
             echo "Intento $i/30..."
@@ -195,7 +202,7 @@ jobs:
             shutdown 2>/dev/null || true
 
           for i in {1..20}; do
-            if ! kill -0 "$(cat /tmp/mysql.pid 2>/dev/null)" 2>/dev/null; then
+            if [ ! -f /tmp/mysql.pid ] || ! sudo kill -0 "$(sudo cat /tmp/mysql.pid 2>/dev/null)" 2>/dev/null; then
               echo "MySQL apagado correctamente."
               break
             fi
@@ -203,6 +210,8 @@ jobs:
             sleep 2
           done
 
-          kill "$(cat /tmp/mysql.pid 2>/dev/null)" 2>/dev/null || true
+          if [ -f /tmp/mysql.pid ]; then
+            sudo kill "$(sudo cat /tmp/mysql.pid 2>/dev/null)" 2>/dev/null || true
+          fi
 
-          echo "Datadir final: $(du -sh "${MYSQL_DATADIR}" | cut -f1)"
+          echo "Datadir final: $(sudo du -sh "${MYSQL_DATADIR}" | cut -f1)"
