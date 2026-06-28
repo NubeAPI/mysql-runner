@@ -16,8 +16,8 @@ permissions:
 env:
   MYSQL_HOST: 127.0.0.1
   MYSQL_PORT: 3306
-  MYSQL_DATABASE: nubeapi
-  MYSQL_USER: nubeapi
+  MYSQL_DATABASE: libertyfinance
+  MYSQL_USER: libertyfinance
   MYSQL_ROOT_PASSWORD: ${{ secrets.MYSQL_ROOT_PASSWORD }}
   MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
   MYSQL_DATADIR: /home/runner/mysql-data
@@ -162,6 +162,34 @@ jobs:
           SQL
 
           echo "Credenciales configuradas."
+
+      # ── 5b. Garantizar BD de aplicación (siempre, idempotente) ──────────
+      #
+      #  Este paso corre incluso cuando NEEDS_INIT=false, cubriendo el caso
+      #  en que la DB fue eliminada en un ciclo anterior sin que el datadir
+      #  se re-inicializara (ej. DROP DATABASE manual, caché desincronizado).
+      # ────────────────────────────────────────────────────────────────────
+      - name: Garantizar base de datos libertyfinance
+        run: |
+          set -Eeuo pipefail
+
+          mysql \
+            -h 127.0.0.1 -P "${MYSQL_PORT}" \
+            -u root \
+            --password="${MYSQL_ROOT_PASSWORD}" \
+            <<SQL
+          CREATE DATABASE IF NOT EXISTS \`libertyfinance\`
+            CHARACTER SET utf8mb4
+            COLLATE utf8mb4_unicode_ci;
+
+          CREATE USER IF NOT EXISTS '${MYSQL_USER}'@'%'
+            IDENTIFIED BY '${MYSQL_PASSWORD}';
+
+          GRANT ALL PRIVILEGES ON \`libertyfinance\`.* TO '${MYSQL_USER}'@'%';
+          FLUSH PRIVILEGES;
+          SQL
+
+          echo "Base de datos libertyfinance verificada/creada."
 
       # ── 6. Verificar conexión con credenciales reales ────────────────────
       - name: Verificar conexión
