@@ -33,18 +33,20 @@ jobs:
       cancel-in-progress: false
 
     steps:
-      # ── 1. Instalar MySQL Server en el runner ────────────────────────────
-      - name: Instalar MySQL 8.0
+      # ── 1. Instalar MySQL Server y destruir AppArmor ─────────────────────
+      - name: Instalar MySQL 8.0 y matar AppArmor
         run: |
           set -Eeuo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y -qq mysql-server-8.0
+          
+          # Instalar apparmor-utils para poder bajar los perfiles del kernel
+          sudo apt-get install -y -qq mysql-server-8.0 apparmor-utils
           sudo systemctl stop mysql || true
           sudo systemctl disable mysql || true
           
-          # DESACTIVAR APPARMOR PARA MYSQL
-          # Vital para permitir que MySQL escriba fuera de /var/lib/mysql
-          sudo aa-disable /usr/sbin/mysqld || true
+          # 🚨 MATAR APPARMOR 🚨 (Evita el "Permission denied" en /home)
+          sudo aa-teardown || true
+          sudo rm -f /etc/apparmor.d/usr.sbin.mysqld
           
           mysql --version
 
@@ -62,7 +64,7 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          # Tomar ownership del directorio sin importar quién lo creó
+          # Forzamos permisos por si el cache los restauró mal
           sudo chown -R runner:runner "${MYSQL_DATADIR}" 2>/dev/null || true
 
           # Un datadir válido siempre tiene mysql/user.ibd
@@ -72,11 +74,14 @@ jobs:
           else
             echo "Datadir inválido o vacío — reinicializando..."
 
-            # ELIMINAR el directorio. No lo creamos con mkdir.
-            # Dejamos que mysqld lo cree desde cero.
+            # Borrado y creación absoluta como runner
             sudo rm -rf "${MYSQL_DATADIR}"
+            sudo mkdir -p "${MYSQL_DATADIR}"
+            sudo chown -R runner:runner "${MYSQL_DATADIR}"
+            chmod 700 "${MYSQL_DATADIR}"
 
-            sudo mysqld \
+            # Inicializamos indicando explícitamente el usuario
+            /usr/sbin/mysqld \
               --initialize-insecure \
               --user=runner \
               --datadir="${MYSQL_DATADIR}"
@@ -90,8 +95,7 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          # Arrancamos mysqld con sudo para mantener coherencia de permisos
-          sudo mysqld \
+          /usr/sbin/mysqld \
             --user=runner \
             --datadir="${MYSQL_DATADIR}" \
             --bind-address=127.0.0.1 \
@@ -101,6 +105,8 @@ jobs:
             --log-error=/tmp/mysql-error.log \
             --skip-networking=OFF \
             > /tmp/mysql-stdout.log 2>&1 &
+
+          echo $! > /tmp/mysql.pid
 
           echo "Esperando que MySQL esté listo..."
 
@@ -114,13 +120,10 @@ jobs:
               break
             fi
 
-            # Validar de forma segura comprobando que el archivo PID exista primero
-            if [ -f /tmp/mysql.pid ]; then
-              if ! sudo kill -0 "$(sudo cat /tmp/mysql.pid)" 2>/dev/null; then
-                echo "MySQL murió antes de arrancar:"
-                cat /tmp/mysql-error.log || true
-                exit 1
-              fi
+            if ! kill -0 "$(cat /tmp/mysql.pid 2>/dev/null)" 2>/dev/null; then
+              echo "MySQL murió antes de arrancar:"
+              cat /tmp/mysql-error.log || true
+              exit 1
             fi
 
             echo "Intento $i/30..."
@@ -190,28 +193,32 @@ jobs:
 
           echo "Apagando MySQL para flush de páginas InnoDB al disco..."
 
-          mysqladmin \
-            -h 127.0.0.1 -P "${MYSQL_PORT}" \
-            -u root \
-            --password="${MYSQL_ROOT_PASSWORD}" \
-            shutdown 2>/dev/null || \
-          mysqladmin \
-            -h 127.0.0.1 -P "${MYSQL_PORT}" \
-            -u root \
-            --socket=/tmp/mysql.sock \
-            shutdown 2>/dev/null || true
+          if [ ! -f /tmp/mysql.pid ]; then
+            echo "MySQL no arrancó (no hay PID). Saltando apagado."
+          else
+            mysqladmin \
+              -h 127.0.0.1 -P "${MYSQL_PORT}" \
+              -u root \
+              --password="${MYSQL_ROOT_PASSWORD}" \
+              shutdown 2>/dev/null || \
+            mysqladmin \
+              -h 127.0.0.1 -P "${MYSQL_PORT}" \
+              -u root \
+              --socket=/tmp/mysql.sock \
+              shutdown 2>/dev/null || true
 
-          for i in {1..20}; do
-            if [ ! -f /tmp/mysql.pid ] || ! sudo kill -0 "$(sudo cat /tmp/mysql.pid 2>/dev/null)" 2>/dev/null; then
-              echo "MySQL apagado correctamente."
-              break
-            fi
-            echo "Esperando shutdown $i/20..."
-            sleep 2
-          done
+            for i in {1..20}; do
+              if ! kill -0 "$(cat /tmp/mysql.pid 2>/dev/null)" 2>/dev/null; then
+                echo "MySQL apagado correctamente."
+                break
+              fi
+              echo "Esperando shutdown $i/20..."
+              sleep 2
+            done
 
-          if [ -f /tmp/mysql.pid ]; then
-            sudo kill "$(sudo cat /tmp/mysql.pid 2>/dev/null)" 2>/dev/null || true
+            kill -9 "$(cat /tmp/mysql.pid 2>/dev/null)" 2>/dev/null || true
           fi
 
-          echo "Datadir final: $(sudo du -sh "${MYSQL_DATADIR}" | cut -f1)"
+          if [ -d "${MYSQL_DATADIR}" ]; then
+            echo "Datadir final: $(du -sh "${MYSQL_DATADIR}" | cut -f1)"
+          fi
