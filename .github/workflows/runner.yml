@@ -1,0 +1,207 @@
+name: MySQL Service
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 */5 * * *"
+  workflow_dispatch:
+  repository_dispatch:
+    types:
+      - backend-updated
+
+permissions:
+  contents: read
+
+env:
+  MYSQL_HOST: 127.0.0.1
+  MYSQL_PORT: 3306
+  MYSQL_DATABASE: ${{ secrets.MYSQL_DATABASE }}
+  MYSQL_USER: ${{ secrets.MYSQL_USER }}
+  MYSQL_ROOT_PASSWORD: ${{ secrets.MYSQL_ROOT_PASSWORD }}
+  MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
+  MYSQL_DATADIR: /home/runner/mysql-data
+
+jobs:
+  mysql:
+    name: Persistir y levantar MySQL
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+
+    concurrency:
+      group: mysql-persistent
+      cancel-in-progress: false
+
+    steps:
+      # ── 1. Instalar MySQL Server en el runner ────────────────────────────
+      - name: Instalar MySQL 8.4
+        run: |
+          set -Eeuo pipefail
+
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mysql-server-8.0
+
+          # Detener el servicio que arranca solo — lo controlamos nosotros
+          sudo systemctl stop mysql || true
+          sudo systemctl disable mysql || true
+
+          mysql --version
+
+      # ── 2. Restaurar cache del ciclo anterior ────────────────────────────
+      - name: Restaurar datadir desde cache
+        id: cache-mysql
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.MYSQL_DATADIR }}
+          key: mysql-datadir-${{ github.repository }}-latest
+          restore-keys: |
+            mysql-datadir-${{ github.repository }}-
+
+      # ── 3. Inicializar datadir si es la primera vez ──────────────────────
+      - name: Inicializar datadir (solo primera ejecución)
+        if: steps.cache-mysql.outputs.cache-hit != 'true'
+        run: |
+          set -Eeuo pipefail
+
+          echo "Primera ejecución — inicializando datadir limpio..."
+
+          mkdir -p "${MYSQL_DATADIR}"
+
+          sudo mysqld \
+            --initialize-insecure \
+            --user=runner \
+            --datadir="${MYSQL_DATADIR}"
+
+          echo "Datadir inicializado en ${MYSQL_DATADIR}."
+
+      # ── 4. Arrancar MySQL apuntando al datadir persistido ────────────────
+      - name: Arrancar MySQL
+        run: |
+          set -Eeuo pipefail
+
+          echo "Arrancando MySQL con datadir persistido..."
+
+          mysqld \
+            --user=runner \
+            --datadir="${MYSQL_DATADIR}" \
+            --bind-address=127.0.0.1 \
+            --port=${MYSQL_PORT} \
+            --socket=/tmp/mysql.sock \
+            --pid-file=/tmp/mysql.pid \
+            --log-error=/tmp/mysql-error.log \
+            --skip-networking=OFF \
+            > /tmp/mysql-stdout.log 2>&1 &
+
+          echo $! > /tmp/mysql.pid
+
+          echo "Esperando que MySQL esté listo..."
+
+          for i in {1..30}; do
+            if mysqladmin ping \
+                -h 127.0.0.1 -P "${MYSQL_PORT}" \
+                -u root \
+                --socket=/tmp/mysql.sock \
+                --silent 2>/dev/null; then
+              echo "MySQL listo en el intento $i."
+              break
+            fi
+
+            if ! kill -0 "$(cat /tmp/mysql.pid 2>/dev/null)" 2>/dev/null; then
+              echo "MySQL murió antes de arrancar:"
+              cat /tmp/mysql-error.log || true
+              exit 1
+            fi
+
+            echo "Intento $i/30..."
+            sleep 3
+          done
+
+          mysql \
+            -h 127.0.0.1 -P "${MYSQL_PORT}" \
+            -u root \
+            --socket=/tmp/mysql.sock \
+            -e "SELECT VERSION();"
+
+      # ── 5. Configurar credenciales (solo primera ejecución) ──────────────
+      - name: Configurar usuarios y DB
+        if: steps.cache-mysql.outputs.cache-hit != 'true'
+        run: |
+          set -Eeuo pipefail
+
+          echo "Configurando root password, usuario y base de datos..."
+
+          mysql \
+            -h 127.0.0.1 -P "${MYSQL_PORT}" \
+            -u root \
+            --socket=/tmp/mysql.sock \
+            --connect-expired-password \
+            <<SQL
+          ALTER USER 'root'@'localhost' IDENTIFIED BY '${MYSQL_ROOT_PASSWORD}';
+          ALTER USER 'root'@'127.0.0.1' IDENTIFIED BY '${MYSQL_ROOT_PASSWORD}';
+          CREATE DATABASE IF NOT EXISTS \`${MYSQL_DATABASE}\`
+            CHARACTER SET utf8mb4
+            COLLATE utf8mb4_unicode_ci;
+          CREATE USER IF NOT EXISTS '${MYSQL_USER}'@'%'
+            IDENTIFIED BY '${MYSQL_PASSWORD}';
+          GRANT ALL PRIVILEGES ON \`${MYSQL_DATABASE}\`.* TO '${MYSQL_USER}'@'%';
+          FLUSH PRIVILEGES;
+          SQL
+
+          echo "Credenciales configuradas."
+
+      # ── 6. Verificar conexión con credenciales reales ────────────────────
+      - name: Verificar conexión
+        run: |
+          set -Eeuo pipefail
+
+          mysql \
+            -h 127.0.0.1 -P "${MYSQL_PORT}" \
+            -u "${MYSQL_USER}" \
+            --password="${MYSQL_PASSWORD}" \
+            "${MYSQL_DATABASE}" \
+            -e "SELECT NOW() AS 'Hora MySQL';
+                SELECT table_name, table_rows
+                FROM information_schema.tables
+                WHERE table_schema = '${MYSQL_DATABASE}'
+                ORDER BY table_name;"
+
+      # ── 7. Aquí corre tu backend normalmente ─────────────────────────────
+      - name: Placeholder — backend usando la DB
+        run: |
+          echo "MySQL corriendo en 127.0.0.1:${MYSQL_PORT}"
+          echo "Base de datos : ${MYSQL_DATABASE}"
+          echo "Usuario       : ${MYSQL_USER}"
+          echo ""
+          echo "Tu backend puede conectarse normalmente."
+          sleep 5
+
+      # ── 8. Apagar MySQL limpiamente antes de guardar el cache ────────────
+      - name: Apagar MySQL limpiamente
+        if: always()
+        run: |
+          set -Eeuo pipefail
+
+          echo "Apagando MySQL para que el datadir quede consistente..."
+
+          mysqladmin \
+            -h 127.0.0.1 -P "${MYSQL_PORT}" \
+            -u root \
+            --password="${MYSQL_ROOT_PASSWORD}" \
+            shutdown 2>/dev/null || true
+
+          # Esperar a que el proceso termine completamente
+          for i in {1..20}; do
+            if ! kill -0 "$(cat /tmp/mysql.pid 2>/dev/null)" 2>/dev/null; then
+              echo "MySQL apagado correctamente."
+              break
+            fi
+            echo "Esperando shutdown $i/20..."
+            sleep 2
+          done
+
+          # Forzar si sigue vivo
+          kill "$(cat /tmp/mysql.pid 2>/dev/null)" 2>/dev/null || true
+          sleep 2
+
+          echo "Datadir listo para ser cacheado:"
+          du -sh "${MYSQL_DATADIR}"
