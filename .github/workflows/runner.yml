@@ -16,8 +16,8 @@ permissions:
 env:
   MYSQL_HOST: 127.0.0.1
   MYSQL_PORT: 3306
-  MYSQL_DATABASE: ${{ secrets.MYSQL_DATABASE }}
-  MYSQL_USER: ${{ secrets.MYSQL_USER }}
+  MYSQL_DATABASE: nubeapi
+  MYSQL_USER: nubeapi
   MYSQL_ROOT_PASSWORD: ${{ secrets.MYSQL_ROOT_PASSWORD }}
   MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
   MYSQL_DATADIR: /home/runner/mysql-data
@@ -57,23 +57,26 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          # Un datadir válido de MySQL siempre contiene la carpeta 'mysql'
-          # con las tablas del sistema. Si no existe, hay que inicializar.
-          if [ -d "${MYSQL_DATADIR}/mysql" ] && \
-             [ -f "${MYSQL_DATADIR}/mysql/user.ibd" ]; then
-            echo "Datadir válido encontrado ($(du -sh "${MYSQL_DATADIR}" | cut -f1))."
+          # Tomar ownership del directorio sin importar quién lo creó
+          sudo chown -R runner:runner "${MYSQL_DATADIR}" 2>/dev/null || true
+
+          # Un datadir válido siempre tiene mysql/user.ibd
+          if [ -f "${MYSQL_DATADIR}/mysql/user.ibd" ]; then
+            echo "Datadir válido ($(du -sh "${MYSQL_DATADIR}" | cut -f1))."
             echo "NEEDS_INIT=false" >> "$GITHUB_ENV"
           else
-            echo "Datadir ausente, vacío o inválido — inicializando desde cero..."
-            rm -rf "${MYSQL_DATADIR}"
-            mkdir -p "${MYSQL_DATADIR}"
+            echo "Datadir inválido o vacío — reinicializando..."
+
+            sudo rm -rf "${MYSQL_DATADIR}"
+            sudo mkdir -p "${MYSQL_DATADIR}"
+            sudo chown runner:runner "${MYSQL_DATADIR}"
 
             sudo mysqld \
               --initialize-insecure \
               --user=runner \
               --datadir="${MYSQL_DATADIR}"
 
-            echo "Datadir inicializado."
+            echo "Datadir inicializado: $(du -sh "${MYSQL_DATADIR}" | cut -f1)"
             echo "NEEDS_INIT=true" >> "$GITHUB_ENV"
           fi
 
@@ -202,4 +205,4 @@ jobs:
 
           kill "$(cat /tmp/mysql.pid 2>/dev/null)" 2>/dev/null || true
 
-          echo "Datadir listo para ser cacheado: $(du -sh "${MYSQL_DATADIR}" | cut -f1)"
+          echo "Datadir final: $(du -sh "${MYSQL_DATADIR}" | cut -f1)"
