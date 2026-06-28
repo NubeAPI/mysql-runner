@@ -34,22 +34,17 @@ jobs:
 
     steps:
       # ── 1. Instalar MySQL Server en el runner ────────────────────────────
-      - name: Instalar MySQL 8.4
+      - name: Instalar MySQL 8.0
         run: |
           set -Eeuo pipefail
-
           sudo apt-get update -qq
           sudo apt-get install -y -qq mysql-server-8.0
-
-          # Detener el servicio que arranca solo — lo controlamos nosotros
           sudo systemctl stop mysql || true
           sudo systemctl disable mysql || true
-
           mysql --version
 
       # ── 2. Restaurar cache del ciclo anterior ────────────────────────────
       - name: Restaurar datadir desde cache
-        id: cache-mysql
         uses: actions/cache@v4
         with:
           path: ${{ env.MYSQL_DATADIR }}
@@ -57,29 +52,35 @@ jobs:
           restore-keys: |
             mysql-datadir-${{ github.repository }}-
 
-      # ── 3. Inicializar datadir si es la primera vez ──────────────────────
-      - name: Inicializar datadir (solo primera ejecución)
-        if: steps.cache-mysql.outputs.cache-hit != 'true'
+      # ── 3. Validar datadir — inicializar si está ausente o corrupto ──────
+      - name: Validar e inicializar datadir
         run: |
           set -Eeuo pipefail
 
-          echo "Primera ejecución — inicializando datadir limpio..."
+          # Un datadir válido de MySQL siempre contiene la carpeta 'mysql'
+          # con las tablas del sistema. Si no existe, hay que inicializar.
+          if [ -d "${MYSQL_DATADIR}/mysql" ] && \
+             [ -f "${MYSQL_DATADIR}/mysql/user.ibd" ]; then
+            echo "Datadir válido encontrado ($(du -sh "${MYSQL_DATADIR}" | cut -f1))."
+            echo "NEEDS_INIT=false" >> "$GITHUB_ENV"
+          else
+            echo "Datadir ausente, vacío o inválido — inicializando desde cero..."
+            rm -rf "${MYSQL_DATADIR}"
+            mkdir -p "${MYSQL_DATADIR}"
 
-          mkdir -p "${MYSQL_DATADIR}"
+            sudo mysqld \
+              --initialize-insecure \
+              --user=runner \
+              --datadir="${MYSQL_DATADIR}"
 
-          sudo mysqld \
-            --initialize-insecure \
-            --user=runner \
-            --datadir="${MYSQL_DATADIR}"
-
-          echo "Datadir inicializado en ${MYSQL_DATADIR}."
+            echo "Datadir inicializado."
+            echo "NEEDS_INIT=true" >> "$GITHUB_ENV"
+          fi
 
       # ── 4. Arrancar MySQL apuntando al datadir persistido ────────────────
       - name: Arrancar MySQL
         run: |
           set -Eeuo pipefail
-
-          echo "Arrancando MySQL con datadir persistido..."
 
           mysqld \
             --user=runner \
@@ -122,13 +123,11 @@ jobs:
             --socket=/tmp/mysql.sock \
             -e "SELECT VERSION();"
 
-      # ── 5. Configurar credenciales (solo primera ejecución) ──────────────
+      # ── 5. Configurar credenciales (solo si el datadir es nuevo) ─────────
       - name: Configurar usuarios y DB
-        if: steps.cache-mysql.outputs.cache-hit != 'true'
+        if: env.NEEDS_INIT == 'true'
         run: |
           set -Eeuo pipefail
-
-          echo "Configurando root password, usuario y base de datos..."
 
           mysql \
             -h 127.0.0.1 -P "${MYSQL_PORT}" \
@@ -171,8 +170,6 @@ jobs:
           echo "MySQL corriendo en 127.0.0.1:${MYSQL_PORT}"
           echo "Base de datos : ${MYSQL_DATABASE}"
           echo "Usuario       : ${MYSQL_USER}"
-          echo ""
-          echo "Tu backend puede conectarse normalmente."
           sleep 5
 
       # ── 8. Apagar MySQL limpiamente antes de guardar el cache ────────────
@@ -181,15 +178,19 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          echo "Apagando MySQL para que el datadir quede consistente..."
+          echo "Apagando MySQL para flush de páginas InnoDB al disco..."
 
           mysqladmin \
             -h 127.0.0.1 -P "${MYSQL_PORT}" \
             -u root \
             --password="${MYSQL_ROOT_PASSWORD}" \
+            shutdown 2>/dev/null || \
+          mysqladmin \
+            -h 127.0.0.1 -P "${MYSQL_PORT}" \
+            -u root \
+            --socket=/tmp/mysql.sock \
             shutdown 2>/dev/null || true
 
-          # Esperar a que el proceso termine completamente
           for i in {1..20}; do
             if ! kill -0 "$(cat /tmp/mysql.pid 2>/dev/null)" 2>/dev/null; then
               echo "MySQL apagado correctamente."
@@ -199,9 +200,6 @@ jobs:
             sleep 2
           done
 
-          # Forzar si sigue vivo
           kill "$(cat /tmp/mysql.pid 2>/dev/null)" 2>/dev/null || true
-          sleep 2
 
-          echo "Datadir listo para ser cacheado:"
-          du -sh "${MYSQL_DATADIR}"
+          echo "Datadir listo para ser cacheado: $(du -sh "${MYSQL_DATADIR}" | cut -f1)"
