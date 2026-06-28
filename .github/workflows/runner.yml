@@ -38,13 +38,11 @@ jobs:
         run: |
           set -Eeuo pipefail
           sudo apt-get update -qq
-          
-          # Instalar apparmor-utils para poder bajar los perfiles del kernel
           sudo apt-get install -y -qq mysql-server-8.0 apparmor-utils
           sudo systemctl stop mysql || true
           sudo systemctl disable mysql || true
           
-          # 🚨 MATAR APPARMOR 🚨 (Evita el "Permission denied" en /home)
+          # Matamos AppArmor
           sudo aa-teardown || true
           sudo rm -f /etc/apparmor.d/usr.sbin.mysqld
           
@@ -64,26 +62,21 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          # Forzamos permisos por si el cache los restauró mal
           sudo chown -R runner:runner "${MYSQL_DATADIR}" 2>/dev/null || true
 
-          # Un datadir válido siempre tiene mysql/user.ibd
           if [ -f "${MYSQL_DATADIR}/mysql/user.ibd" ]; then
             echo "Datadir válido ($(du -sh "${MYSQL_DATADIR}" | cut -f1))."
             echo "NEEDS_INIT=false" >> "$GITHUB_ENV"
           else
             echo "Datadir inválido o vacío — reinicializando..."
 
-            # Borrado y creación absoluta como runner
             sudo rm -rf "${MYSQL_DATADIR}"
-            sudo mkdir -p "${MYSQL_DATADIR}"
-            sudo chown -R runner:runner "${MYSQL_DATADIR}"
-            chmod 700 "${MYSQL_DATADIR}"
+            mkdir -p "${MYSQL_DATADIR}"
 
-            # Inicializamos indicando explícitamente el usuario
+            # 🚨 LA CLAVE: --no-defaults aísla MySQL de la configuración del sistema
             /usr/sbin/mysqld \
+              --no-defaults \
               --initialize-insecure \
-              --user=runner \
               --datadir="${MYSQL_DATADIR}"
 
             echo "Datadir inicializado: $(du -sh "${MYSQL_DATADIR}" | cut -f1)"
@@ -95,8 +88,9 @@ jobs:
         run: |
           set -Eeuo pipefail
 
+          # 🚨 LA CLAVE: --no-defaults otra vez para el arranque
           /usr/sbin/mysqld \
-            --user=runner \
+            --no-defaults \
             --datadir="${MYSQL_DATADIR}" \
             --bind-address=127.0.0.1 \
             --port=${MYSQL_PORT} \
