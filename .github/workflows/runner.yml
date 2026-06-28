@@ -73,7 +73,6 @@ jobs:
             sudo rm -rf "${MYSQL_DATADIR}"
             mkdir -p "${MYSQL_DATADIR}"
 
-            # 🚨 LA CLAVE: --no-defaults aísla MySQL de la configuración del sistema
             /usr/sbin/mysqld \
               --no-defaults \
               --initialize-insecure \
@@ -88,7 +87,6 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          # 🚨 LA CLAVE: --no-defaults otra vez para el arranque
           /usr/sbin/mysqld \
             --no-defaults \
             --datadir="${MYSQL_DATADIR}" \
@@ -142,13 +140,20 @@ jobs:
             --socket=/tmp/mysql.sock \
             --connect-expired-password \
             <<SQL
+          /* Alteramos el root de localhost que viene por defecto */
           ALTER USER 'root'@'localhost' IDENTIFIED BY '${MYSQL_ROOT_PASSWORD}';
-          ALTER USER 'root'@'127.0.0.1' IDENTIFIED BY '${MYSQL_ROOT_PASSWORD}';
+          
+          /* CREAMOS el root para 127.0.0.1 porque no existe de fábrica y le damos permisos */
+          CREATE USER IF NOT EXISTS 'root'@'127.0.0.1' IDENTIFIED BY '${MYSQL_ROOT_PASSWORD}';
+          GRANT ALL PRIVILEGES ON *.* TO 'root'@'127.0.0.1' WITH GRANT OPTION;
+          
           CREATE DATABASE IF NOT EXISTS \`${MYSQL_DATABASE}\`
             CHARACTER SET utf8mb4
             COLLATE utf8mb4_unicode_ci;
+            
           CREATE USER IF NOT EXISTS '${MYSQL_USER}'@'%'
             IDENTIFIED BY '${MYSQL_PASSWORD}';
+            
           GRANT ALL PRIVILEGES ON \`${MYSQL_DATABASE}\`.* TO '${MYSQL_USER}'@'%';
           FLUSH PRIVILEGES;
           SQL
