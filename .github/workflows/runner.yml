@@ -21,6 +21,9 @@ env:
   MYSQL_ROOT_PASSWORD: ${{ secrets.MYSQL_ROOT_PASSWORD }}
   MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
   MYSQL_DATADIR: /home/runner/mysql-data
+  # 5 horas y 30 minutos.
+  # GitHub-hosted runners tienen límite de duración de 6 horas.
+  LIVE_SECONDS: 19800
 
 jobs:
   mysql:
@@ -176,13 +179,14 @@ jobs:
                 WHERE table_schema = '${MYSQL_DATABASE}'
                 ORDER BY table_name;"
 
-      # ── 7. Aquí corre tu backend normalmente ─────────────────────────────
-      - name: Placeholder — backend usando la DB
+      # ── 7. Mantener el servicio vivo ─────────────────────────────────────
+      - name: Mantener MySQL vivo
         run: |
           echo "MySQL corriendo en 127.0.0.1:${MYSQL_PORT}"
           echo "Base de datos : ${MYSQL_DATABASE}"
           echo "Usuario       : ${MYSQL_USER}"
-          sleep 5
+          echo "Manteniendo MySQL vivo durante ${LIVE_SECONDS} segundos..."
+          sleep "${LIVE_SECONDS}"
 
       # ── 8. Apagar MySQL limpiamente antes de guardar el cache ────────────
       - name: Apagar MySQL limpiamente
