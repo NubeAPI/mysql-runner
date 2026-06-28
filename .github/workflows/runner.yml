@@ -27,7 +27,7 @@ env:
 
 jobs:
   mysql:
-    name: Persistir y levantar MySQL
+    name: Persistir y levantar MySQL con Cloudflare
     runs-on: ubuntu-latest
     timeout-minutes: 355
 
@@ -179,20 +179,86 @@ jobs:
                 WHERE table_schema = '${MYSQL_DATABASE}'
                 ORDER BY table_name;"
 
-      # ── 7. Mantener el servicio vivo ─────────────────────────────────────
-      - name: Mantener MySQL vivo
+      # ── 7. Instalar cloudflared ──────────────────────────────────────────
+      - name: Instalar cloudflared
+        run: |
+          set -Eeuo pipefail
+          set -x
+
+          echo "Instalando cloudflared..."
+
+          curl -L \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+            -o cloudflared
+
+          chmod +x cloudflared
+          sudo mv cloudflared /usr/local/bin/cloudflared
+
+          cloudflared --version
+
+      # ── 8. Exponer MySQL con Cloudflare Tunnel ───────────────────────────
+      - name: Exponer base de datos con Cloudflare Tunnel
+        env:
+          CLOUDFLARED_TOKEN: ${{ secrets.CLOUDFLARED_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          set -x
+
+          if [ -z "${CLOUDFLARED_TOKEN:-}" ]; then
+            echo "Falta el secret CLOUDFLARED_TOKEN."
+            exit 1
+          fi
+
+          rm -f cloudflared.log cloudflared.pid
+
+          echo "Iniciando Cloudflare Tunnel..."
+          cloudflared tunnel --no-autoupdate run --token "${CLOUDFLARED_TOKEN}" \
+            > cloudflared.log 2>&1 &
+
+          CLOUDFLARED_PID=$!
+          echo "$CLOUDFLARED_PID" > cloudflared.pid
+
+          echo "PID cloudflared: $CLOUDFLARED_PID"
+          echo "Esperando que cloudflared conecte..."
+
+          for i in {1..120}; do
+            echo "----- Esperando Cloudflare Tunnel $i/120 -----"
+
+            if ! ps -p "$CLOUDFLARED_PID" > /dev/null; then
+              echo "cloudflared murió antes de conectar."
+              cat cloudflared.log || true
+              exit 1
+            fi
+
+            if grep -Ei "registered tunnel connection|connection.*registered|connected" cloudflared.log > /dev/null; then
+              echo "cloudflared conectado exitosamente al edge de Cloudflare."
+              break
+            fi
+
+            sleep 2
+          done
+
+      # ── 9. Mantener el servicio vivo ─────────────────────────────────────
+      - name: Mantener procesos vivos
         run: |
           echo "MySQL corriendo en 127.0.0.1:${MYSQL_PORT}"
           echo "Base de datos : ${MYSQL_DATABASE}"
           echo "Usuario       : ${MYSQL_USER}"
-          echo "Manteniendo MySQL vivo durante ${LIVE_SECONDS} segundos..."
+          echo "Cloudflare Tunnel exponiendo el servicio."
+          echo "Manteniendo la infraestructura viva durante ${LIVE_SECONDS} segundos..."
           sleep "${LIVE_SECONDS}"
 
-      # ── 8. Apagar MySQL limpiamente antes de guardar el cache ────────────
-      - name: Apagar MySQL limpiamente
+      # ── 10. Apagar MySQL y Túnel limpiamente ─────────────────────────────
+      - name: Apagar servicios limpiamente
         if: always()
         run: |
           set -Eeuo pipefail
+
+          # Apagar cloudflared
+          if [ -f cloudflared.pid ]; then
+            echo "Apagando cloudflared..."
+            kill "$(cat cloudflared.pid 2>/dev/null)" 2>/dev/null || true
+          fi
 
           echo "Apagando MySQL para flush de páginas InnoDB al disco..."
 
